@@ -32,6 +32,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <dlfcn.h>
 
@@ -59,9 +60,7 @@ constexpr const char *kFpsCounterKey =
 constexpr int64_t kMinFrameIntervalNs =
     2'000'000LL;
 
-constexpr int64_t kMaxFrameIntervalNs =
-    80'000'000LL;
-
+(m)=>m+"\nconstexpr EGLint kEglRefreshRate = 0x200F;\nconstexpr int64_t kFallbackFramePeriodNs = 16'666'667LL;\n"
 // ============================================================
 // Fullscreen quad
 // ============================================================
@@ -835,9 +834,7 @@ private:
     int64_t mLastHookStartNs =
         0;
 
-    int64_t mLastPresentedTimeNs =
-        0;
-
+(m)=>m+"\n    EGLDisplay mRefreshDisplay = EGL_NO_DISPLAY;\n    EGLSurface mRefreshSurface = EGL_NO_SURFACE;\n    int64_t mFramePeriodNs = kFallbackFramePeriodNs;\n"
     // ============================================================
     // Settings
     // ============================================================
@@ -1086,6 +1083,44 @@ private:
         ).count();
     }
 
+    int64_t framePeriodForSurface(EGLDisplay dpy, EGLSurface surface) {
+        if (dpy == mRefreshDisplay && surface == mRefreshSurface) {
+            return mFramePeriodNs;
+        }
+
+        mRefreshDisplay = dpy;
+        mRefreshSurface = surface;
+        mFramePeriodNs = kFallbackFramePeriodNs;
+
+        EGLint surfaceConfigId = 0;
+        EGLint configCount = 0;
+        if (eglQuerySurface(dpy, surface, EGL_CONFIG_ID, &surfaceConfigId) == EGL_FALSE ||
+            eglGetConfigs(dpy, nullptr, 0, &configCount) == EGL_FALSE ||
+            configCount <= 0) {
+            return mFramePeriodNs;
+        }
+
+        std::vector<EGLConfig> configs(static_cast<size_t>(configCount));
+        EGLint returnedCount = 0;
+        if (eglGetConfigs(dpy, configs.data(), configCount, &returnedCount) == EGL_FALSE) {
+            return mFramePeriodNs;
+        }
+
+        for (EGLint i = 0; i < returnedCount; ++i) {
+            EGLint configId = 0;
+            EGLint refreshRate = 0;
+            const EGLConfig config = configs[static_cast<size_t>(i)];
+            if (eglGetConfigAttrib(dpy, config, EGL_CONFIG_ID, &configId) != EGL_FALSE &&
+                configId == surfaceConfigId &&
+                eglGetConfigAttrib(dpy, config, kEglRefreshRate, &refreshRate) != EGL_FALSE &&
+                refreshRate > 0) {
+                mFramePeriodNs = 1'000'000'000LL / refreshRate;
+                break;
+            }
+        }
+        return mFramePeriodNs;
+    }
+
     void resetTiming() {
 
         mHaveHistory =
@@ -1094,9 +1129,7 @@ private:
         mLastHookStartNs =
             0;
 
-        mLastPresentedTimeNs =
-            0;
-    }
+(m)=>m+"\n        mRefreshDisplay = EGL_NO_DISPLAY;\n        mRefreshSurface = EGL_NO_SURFACE;\n        mFramePeriodNs = kFallbackFramePeriodNs;\n"    }
 
     // ============================================================
     // Statistics
@@ -1354,9 +1387,7 @@ private:
         // Frame timing
         // --------------------------------------------------------
 
-        const int64_t hookNowNs =
-            nowNs();
-
+(m)=>m+"\n        const int64_t framePeriodNs =\n            framePeriodForSurface(dpy, surface);\n"
         int64_t frameIntervalNs =
             0;
 
@@ -1388,11 +1419,7 @@ private:
             !mHaveHistory
         ) {
 
-            const int64_t firstTimestamp =
-                std::max(
-                    hookNowNs,
-                    mLastPresentedTimeNs + 1
-                );
+            const int64_t firstTimestamp = hookNowNs + framePeriodNs;
 
             mPresentationTimeFn(
                 dpy,
@@ -1456,11 +1483,7 @@ private:
                 kMaxFrameIntervalNs
         ) {
 
-            const int64_t timestamp =
-                std::max(
-                    hookNowNs,
-                    mLastPresentedTimeNs + 1
-                );
+            const int64_t timestamp = std::max(hookNowNs + framePeriodNs, mLastPresentedTimeNs + framePeriodNs);
 
             mPresentationTimeFn(
                 dpy,
@@ -1526,28 +1549,19 @@ private:
         // Generation amount
         // ========================================================
 
-        const int steps =
-            std::clamp(
-                mode,
-                1,
-                2
-            );
+        const int availableFrameSlots = std::max(1, static_cast<int>((frameIntervalNs + framePeriodNs / 2) / framePeriodNs));
+        const int steps = std::min(mode, availableFrameSlots - 1);
 
         // ========================================================
         // Next real timestamp
         // ========================================================
 
-        int64_t targetRealTimestamp =
-            mLastPresentedTimeNs +
-            frameIntervalNs;
+        const int64_t previousRealTimestamp = mLastPresentedTimeNs;
 
-        if (
-            targetRealTimestamp <
-            hookNowNs
-        ) {
-
-            targetRealTimestamp =
-                hookNowNs;
+        int64_t targetRealTimestamp = previousRealTimestamp + frameIntervalNs;
+        const int64_t workCompleteNs = nowNs();
+        if (targetRealTimestamp <= workCompleteNs) {
+            targetRealTimestamp = workCompleteNs + framePeriodNs;
         }
 
         // ========================================================
@@ -1566,17 +1580,7 @@ private:
                     steps + 1
                 );
 
-            const int64_t syntheticTimestamp =
-                mLastPresentedTimeNs +
-                static_cast<int64_t>(
-                    static_cast<double>(
-                        targetRealTimestamp -
-                        mLastPresentedTimeNs
-                    ) *
-                    static_cast<double>(
-                        t
-                    )
-                );
+            const int64_t syntheticTimestamp = previousRealTimestamp + static_cast<int64_t>(static_cast<double>(targetRealTimestamp - previousRealTimestamp) * static_cast<double>(t));
 
             const int64_t currentTimeNs =
                 nowNs();
@@ -1646,14 +1650,7 @@ private:
         // Final real frame
         // ========================================================
 
-        const int64_t finalTimestamp =
-            std::max(
-                targetRealTimestamp,
-                std::max(
-                    nowNs(),
-                    mLastPresentedTimeNs + 1
-                )
-            );
+        const int64_t finalTimestamp = std::max(targetRealTimestamp, std::max(nowNs() + framePeriodNs, mLastPresentedTimeNs + framePeriodNs));
 
         mPresentationTimeFn(
             dpy,
