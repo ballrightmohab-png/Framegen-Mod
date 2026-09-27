@@ -1,0 +1,11 @@
+{
+  "type": "preload-native",
+  "name": "Frame Generator",
+  "author": "you",
+  "version": "1.0.1",
+  "entry": "libframegen_mod.so",
+  "minecraft_versions": [
+    "1.26.51",
+    "1.26.52"
+  ]
+}
